@@ -7,9 +7,6 @@ Copyright (c) 2010-2022, Delft University of Technology. All rights reserved. Th
 """
 """
 
-import sys
-sys.path.insert(0, "/home/mfayolle/Tudat/tudat-bundle/cmake-build-release-2/tudatpy")
-
 # Load required standard modules
 import multiprocessing as mp
 import os
@@ -180,6 +177,10 @@ def perform_residuals_analysis(inputs):
 
         filename_suffix = str(input_index) + ''
 
+        ### ------------------------------------------------------------------------------------------
+        ### LOAD ALL REQUESTED KERNELS AND FILES
+        ### ------------------------------------------------------------------------------------------
+
         # Load MRO orientation kernels (over the entire relevant time period).
         # Note: each orientation kernel covers a certain time interval, usually spanning over a few days.
         # It must be noted, however, that some dates are not entirely covered, i.e., there is no orientation information available over
@@ -218,6 +219,11 @@ def perform_residuals_analysis(inputs):
         # For the latest ODF data set, this might imply stepping outside the time interval that the loaded spice kernels cover.
         odf_files = odf_files[:-1]
 
+
+        ### ------------------------------------------------------------------------------------------
+        ### LOAD ODF OBSERVATIONS AND PERFORM PRE-PROCESSING STEPS
+        ### ------------------------------------------------------------------------------------------
+
         # Load ODF files
         multi_odf_file_contents = estimation_setup.observation.process_odf_data_multiple_files(odf_files, 'MRO', True)
 
@@ -229,8 +235,6 @@ def perform_residuals_analysis(inputs):
         original_odf_observations = estimation_setup.observation.create_odf_observed_observation_collection(
             multi_odf_file_contents, [estimation_setup.observation.dsn_n_way_averaged_doppler],
             [numerical_simulation.Time(0, np.nan), numerical_simulation.Time(0, np.nan)])
-        # original_odf_observations = estimation_setup.observation.create_odf_observed_observation_collection(
-        #     multi_odf_file_contents, [estimation_setup.observation.dsn_n_way_averaged_doppler])
 
         # Filter out observations on dates when orientation kernels are incomplete
         dates_to_filter_float = []
@@ -243,7 +247,7 @@ def perform_residuals_analysis(inputs):
             # Filter out observations from observation collection
             original_odf_observations.filter_observations(date_filter)
 
-        # Remove empty observation sets, if there is any once the filtering is performed
+        # Remove empty observation sets, if there is any once the filtering is completed
         original_odf_observations.remove_empty_observation_sets()
 
         # Split observation sets at dates when orientation kernels are incomplete.
@@ -254,11 +258,22 @@ def perform_residuals_analysis(inputs):
         date_splitter = estimation.observation_set_splitter(estimation.time_tags_splitter, dates_to_filter_float)
         original_odf_observations.split_observation_sets(date_splitter)
 
-        # Remove empty observation sets, if there is any once the splitting is performed
+        # Remove empty observation sets, if there is any once both the splitting is completed
         original_odf_observations.remove_empty_observation_sets()
 
         print('original_odf_observations')
         original_odf_observations.print_observation_sets_start_and_size()
+
+        # Compress Doppler observations from 1.0 s integration time to 60.0 s
+        compressed_observations = estimation_setup.observation.create_compressed_doppler_collection(
+            original_odf_observations, 60, 10)
+        print('Compressed observations: ')
+        print(compressed_observations.concatenated_observations.size)
+
+
+        ### ------------------------------------------------------------------------------------------
+        ### CREATE DYNAMICAL ENVIRONMENT
+        ### ------------------------------------------------------------------------------------------
 
         # Create default body settings for celestial bodies
         bodies_to_create = ["Earth", "Sun", "Mercury", "Venus", "Mars", "Jupiter", "Saturn", "Moon"]
@@ -300,6 +315,10 @@ def perform_residuals_analysis(inputs):
         estimation_setup.observation.set_odf_information_in_bodies(multi_odf_file_contents, bodies)
 
 
+        ### ------------------------------------------------------------------------------------------
+        ### SET ANTENNA AS REFERENCE POINT FOR DOPPLER OBSERVATIONS
+        ### ------------------------------------------------------------------------------------------
+
         # Define MRO center-of-mass (COM) position w.r.t. the origin of the MRO-fixed reference frame (frame spice ID: MRO_SPACECRAFT)
         # This value was taken from Konopliv et al. (2011) doi:10.1016/j.icarus.2010.10.004
         # This is necessary to define the position of the antenna w.r.t. the COM, in the MRO-fixed frame (see below)
@@ -317,7 +336,7 @@ def perform_residuals_analysis(inputs):
         # This is to ensure that the antenna position history spans over a slightly extended time interval than the observation epochs
         # of the given set. When simulating Doppler data to compute the MRO residuals, we might indeed need to access the antenna position
         # slightly outside the exact time bounds defined by the observation epochs because of the light-time delay.
-        for obs_times in original_odf_observations.get_observation_times():
+        for obs_times in compressed_observations.get_observation_times():
             time = obs_times[0].to_float() - 3600.0
             while time <= obs_times[-1].to_float() + 3600.0:
                 state = np.zeros((6, 1))
@@ -339,13 +358,12 @@ def perform_residuals_analysis(inputs):
         antenna_ephemeris = environment_setup.ephemeris.create_ephemeris(antenna_ephemeris_settings, "Antenna")
 
         # Set the spacecraft's reference point position to that of the antenna (in the MRO-fixed frame)
-        original_odf_observations.set_reference_point( bodies, antenna_ephemeris, "Antenna", "MRO", observation.reflector1)
+        compressed_observations.set_reference_point(bodies, antenna_ephemeris, "Antenna", "MRO", observation.reflector1)
 
 
-        # Compress Doppler observations from 1.0 s integration time to 60.0 s
-        compressed_observations = estimation_setup.observation.create_compressed_doppler_collection(original_odf_observations, 60, 10)
-        print('Compressed observations: ')
-        print(compressed_observations.concatenated_observations.size)
+        ### ------------------------------------------------------------------------------------------
+        ### DEFINE SETTINGS TO SIMULATE OBSERVATIONS AND COMPUTE RESIDUALS
+        ### ------------------------------------------------------------------------------------------
 
         #  Create light-time corrections list
         light_time_correction_list = list()
@@ -374,7 +392,6 @@ def perform_residuals_analysis(inputs):
             observation_model_settings.append(estimation_setup.observation.dsn_n_way_doppler_averaged(
                 current_link_definition, light_time_correction_list))
 
-
         # Create observation simulators.
         observation_simulators = estimation_setup.create_observation_simulators(observation_model_settings, bodies)
 
@@ -386,6 +403,11 @@ def perform_residuals_analysis(inputs):
 
         # Compute and set residuals in the compressed observation collection
         estimation.compute_residuals_and_dependent_variables(compressed_observations, observation_simulators, bodies)
+
+
+        ### ------------------------------------------------------------------------------------------
+        ### RETRIEVE AND SAVE VARIOUS OBSERVATION OUTPUTS
+        ### ------------------------------------------------------------------------------------------
 
         # Retrieve RMS and mean of the residuals, sorted per observation set
         rms_residuals = compressed_observations.get_rms_residuals()
@@ -454,7 +476,10 @@ def perform_residuals_analysis(inputs):
         if input_index == 0:
 
             # Create observation parser to retrieve observation-related quantities over the first day of data
-            first_day_parser = estimation.observation_parser((start_time + 2.0 * 86400.0, start_time + 3.0 * 86400.0))
+            # (starting from the first observation epoch)
+            # first_day_parser = estimation.observation_parser((start_time + 2.0 * 86400.0, start_time + 3.0 * 86400.0))
+            start_obs_times = time_bounds_per_filtered_set[0][0].to_float()
+            first_day_parser = estimation.observation_parser((start_obs_times, start_obs_times + 86400.0))
 
             # Retrieve residuals, observation times and dependent variables over the first day
             first_day_observation_times = compressed_observations.get_concatenated_float_observation_times(first_day_parser)
@@ -496,8 +521,6 @@ if __name__ == "__main__":
                  datetime(2012, 8, 31),
                  datetime(2012, 10, 31),
                  datetime(2012, 12, 31)]
-
-    trajectory_kernels = []
 
     # For each parallel run
     for i in range(nb_cores):

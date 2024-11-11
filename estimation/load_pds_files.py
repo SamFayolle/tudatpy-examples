@@ -1,9 +1,3 @@
-import sys
-
-import numpy as np
-
-sys.path.insert(0, "/home/mfayolle/Tudat/tudat-bundle/cmake-build-release/tudatpy")
-
 import requests
 from bs4 import BeautifulSoup
 from urllib.request import urlretrieve
@@ -32,7 +26,12 @@ def is_date_in_intervals(date, intervals):
 # This function is designed to handle files that cover time intervals of several days, rather than a specific date
 # (see alternative download_url_files_time function).
 #
-# About the filename_format input:
+# About the filename_format and time_interval_format inputs: the symbol '*' should be used to indicate where the time interval is specified
+# in the filename. This will be used as a wildcard for the function to look for all pattern-matching filenames at the specified url.
+# Similarly, the time_interval_format input makes use of the time format strings of the python datetime module
+# (see https://docs.python.org/3/library/datetime.html#strftime-and-strptime-format-codes)
+# As an example, the following filename_format = 'mro_sc_psp_*.bc' and time_interval_format = '%y%m%d_%y%m%d' will allow the function
+# to look for files with names like 'mro_sc_psp_201006_201012.bc'
 
 def download_url_files_time_interval(local_path, filename_format, start_date, end_date, url, time_interval_format ):
 
@@ -172,35 +171,51 @@ def download_url_files_time_interval(local_path, filename_format, start_date, en
 # whether each of these files already locally exists (at the location given by the local_path input argument). If not,
 # it automatically downloads the missing file.
 #
-# This function is designed to handle files that only cover one specific dates, rather than time intervals of several days
+# This function is designed to handle files that only cover one specific date, rather than time intervals of several days
 # (see alternative download_url_files_time_interval function).
+#
+# About the filename_format and time_format inputs: the filename_format is a string where the symbol '*' should be used to indicate where
+# the date of interest is specified. The symbol '\w' can also be included to denote any part of the filename that is unknown or unspecified
+# by the user (e.g., the exact time at which a file is created). Both '*' and '\w' are then used as a wildcard for the function to look for
+# all pattern-matching filenames at the specified url.
+# The input indices_date_filename should moreover indicate where the date starts in the filename string.
+# The time_format input is a string exploiting the time format strings of the python datetime module to specify the formatting used
+# for the time tag in the filename (see https://docs.python.org/3/library/datetime.html#strftime-and-strptime-format-codes)
+# As an example, the following filename_format = 'mromagr*_\w\w\w\wxmmmv1.odf' and time_format = '%Y_%j' will allow the function
+# to look for files with names like 'mromagr2016_217_0840xmmmv1.odf'
 
 def download_url_files_time(local_path, filename_format, start_date, end_date, url, time_format,
                             indices_date_filename ):
 
+    # Retrieve all dates contained within the time interval defined by the start and end dates provided as inputs
     all_dates = [start_date + timedelta(days=x) for x in range((end_date - start_date).days + 1)]
 
+    # Split the file name at the symbol "/", to separate between the name of the file and the folder in which it might be contained
     filename_split = filename_format.split('/')
-    nested_folder = ''
+    folder = ''
     if (len(filename_split)>2):
-        raise Exception("the filename format cannot contain more than one nested folder.")
+        raise Exception("in the current implementation, the filename format cannot contain more than one folder.")
     elif (len(filename_split) == 2):
-        nested_folder = filename_split[0]
+        folder = filename_split[0]
 
+    # In the reduced file name (after removing the folder part), replace the wildcards - indicated by "\w" - by "*", which will later allow the
+    # BeautifulSoup package to look for all pattern-matching names at the targeted url (without any a priori information on the date and/or
+    # wildcard present in the file name)
     reduced_filename = filename_split[-1]
     reduced_filename = reduced_filename.replace('\w', '*')
-    # print('reduced_filename', reduced_filename)
 
-
+    # Retrieve all filenames present at the "local_path" location that match the specified filename format
     existing_files = glob.glob(local_path + reduced_filename)
     print('nb existing files', len(existing_files))
-    # print(existing_files)
 
+    # Identify dates of interest that are not covered by existing files
     relevant_files = []
     dates_without_file = []
     for date in all_dates:
+        # Create string object corresponding to the date under investigation
         date_str = date.strftime(time_format)
 
+        # Reconstruct the expected filename for this particular date
         current_filename = ''
         index = 0
         for ind in indices_date_filename:
@@ -208,36 +223,46 @@ def download_url_files_time(local_path, filename_format, start_date, end_date, u
             index = ind+1
         current_filename += filename_format[index:]
 
-        # print('current filename for existing file', local_path + current_filename.split('/')[-1])
-
+        # Parse existing files and check whether the current file name can be found
         current_files = [x for x in existing_files if re.match(local_path + current_filename.split('/')[-1], x)]
+        # If so, add the identified file to the list of relevant files to be loaded
         if len(current_files) > 0:
             for file in current_files:
                 relevant_files.append(current_files[0])
+        # If not, mark the current date as non-covered by any file yet (i.e., date for which a file is missing)
         else:
             dates_without_file.append(date)
 
-    # print("dates_without_file", dates_without_file)
-
-    # Retrieve files from PDS
+    # Retrieve the missing files from the specified url
     if len(dates_without_file) > 0:
-        reqs = requests.get(url)
+
+        # List containing the names of the files to be downloaded
         files_url = []
+
+        # Parse all files contained at the targeted url
+        reqs = requests.get(url)
         for link in BeautifulSoup(reqs.text, 'html.parser').find_all('a'):
+
+            # Retrieve full url link for each of these files
             full_link = link.get('href')
-            if len(nested_folder)==0:
+
+            # Check whether the file of interest is nested within an additional folder
+            if len(folder)==0:
                 current_filename = full_link.split("/")[-1]
             else:
                 current_filename = full_link.split("/")[-2]
+
+            # Store the name of the file to be downloaded
             files_url.append(current_filename)
 
-        # print('files url', files_url)
 
-    # Download missing files from PDS
+    # Parse all dates for which a file was originally missing and download missing files from the specified url.
     for date in dates_without_file:
 
+        # List of the files to be downloaded
         files_to_download = []
 
+        # Reconstruct expected filename for the date under consideration
         date_str = date.strftime(time_format)
         current_filename = ''
         index = 0
@@ -246,35 +271,37 @@ def download_url_files_time(local_path, filename_format, start_date, end_date, u
             index = ind + 1
         current_filename += filename_format[index:]
 
+        # Check whether a matching file was found at the targeted url for this specific date, and split the filename at "/"
+        # to account for the possibility that the targeted file is stored in a nested folder
         file_to_download = [x for x in files_url if re.match(current_filename.split('/')[0], x)]
 
-        if (len(nested_folder)==0):
+        # If the file is directly stored at the specified url (no nested folder), then the filename can be stored directly
+        if (len(folder)==0):
             files_to_download = file_to_download
 
-        # Explore nested folder if any
-        if (len(nested_folder)>0 and len(file_to_download)>0):
+        # Otherwise, explore additional folder layer
+        if (len(folder)>0 and len(file_to_download)>0):
             reqs2 = requests.get(url + file_to_download[0])
+
+            # Parse all files within the current folder
             for nested_link in BeautifulSoup(reqs2.text, 'html.parser').find_all('a'):
                 nested_file = nested_link.get('href')
-                # print('nested_link', nested_file)
 
+                # Retrieve all matching file names within the current folder
                 relevant_link = [x for x in [nested_file] if re.match(current_filename.split('/')[-1], x.split('/')[-1])]
-                # print('relevant link', relevant_link)
 
+                # If a match is found, store the filename that should be downloaded (now including the extra folder layer)
                 if (len(relevant_link) == 1):
                     files_to_download.append(file_to_download[0] + "/" + relevant_link[0].split("/")[-1])
 
-        # print('files_to_download', files_to_download)
 
+        # Download all relevant files from the targeted url
         for file in files_to_download:
             print('download ', url + file)
             urlretrieve(url + file, local_path + file.split("/")[-1])
             relevant_files.append(local_path + file.split("/")[-1])
 
-    # print('relevant files')
-    # for f in relevant_files:
-    #     print(f)
-
+    # Return the list of all relevant files that should be loaded to cover the time interval of interest
     return relevant_files
 
 
